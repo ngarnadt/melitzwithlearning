@@ -115,12 +115,12 @@ class MultiRegionLearning:
         V=np.empty_like(W)
         
         for i in range(len(L)):
-            for phi in self.phigrid:
-                for a in self.shockgrid:
+            for phi_id, phi in enumerate(self.phigrid):
+                for a_id, a in enumerate(self.shockgrid):
                     for n in self.agegrid:
                         
-                        if n < len(self.agegrid):
-                            W_fun = lambda x: np.interp(x,self.shockgrid,W[i,phi,:,n+1])
+                        if n < len(self.agegrid)-2:
+                            W_fun = lambda x: np.interp(x,self.shockgrid,W[i,phi_id,:,n+1])
                         else:
                             W_fun = lambda x: 0*x
                             
@@ -130,13 +130,46 @@ class MultiRegionLearning:
                         
                         abardist = stats.norm(mu(a,n),nu(n)+sig_eps**2)
                         integrand = lambda x: W_fun(x)*abardist.pdf(x)
-                        Vexp = beta*(1-delta)*np.quad(integrand,-np.inf,np.inf)
+                        Vexp = beta*(1-delta)*integrate.quad(integrand,-np.inf,np.inf)
                         
-                        V[i,phi,a,n] = max(Vpayhome+Vpayfor+Vexp,0)
+                        V[i,phi_id,a_id,n] = max(Vpayhome+Vpayfor+Vexp,0)
+
+    def backwards_operator(self,W,wage,P):
+        '''
+        Bellman operator for a given vector of location specific wages w and
+        price levels P. Takes the current value function guess W and maps it
+        into a new value function V.
+        '''
+        L = self.L
+        beta = self.beta
+        delta = self.delta
+        payoff = self.payoff
+        mu=self.mu
+        nu=self.nu
+        sig_eps=self.sig_eps
+        
+        for i in range(len(L)):
+            for phi_id, phi in enumerate(self.phigrid):
+                for a_id, a in enumerate(self.shockgrid):
+                    for n in self.agegrid:
                         
-        return V
+                        if n > 0:
+                            W_fun = lambda x: np.interp(x,self.shockgrid,W[i,phi_id,:,len(self.agegrid)-n])
+                        else:
+                            W_fun = lambda x: 0*x
+                            
+                        Vpayhome = payoff(wage,P,i,i,phi,a,n)
+                        Vpayfor = sum(max(payoff(wage,P,i,j,phi,a,n),0)
+                                    for j in range(len(L)))-max(Vpayhome,0)
+                        
+                        abardist = stats.norm(mu(a,n),nu(n)+sig_eps**2)
+                        integrand = lambda x: W_fun(x)*abardist.pdf(x)
+                        Vexp = beta*(1-delta)*integrate.quad(integrand,-np.inf,np.inf)
+                        W[i,phi_id,a_id,len(self.agegrid)-n-1] = max(Vpayhome+Vpayfor+Vexp,0)
+                        
+        return W
     
-    def find_cutoffs(self,V):
+    def find_phi_cutoffs(self,V):
         '''
         Finds the cutoff productivity levels phi*(i,abar,n) below which firms
         exit the market given a value function V
@@ -148,11 +181,64 @@ class MultiRegionLearning:
         
         cutoff = np.empty((len(range(L)),len(shockgrid),len(agegrid)))
         for i in range(len(L)):
-            for a in shockgrid:
+            for a_id, a in enumerate(shockgrid):
                 for n in agegrid:
-                    cutoff[i,a,n] = phigrid[np.searchsorted(V[i,:,a,n],0)]
+                    cutoff[i,a_id,n] = phigrid[np.searchsorted(V[i,:,a_id,n],0)]
         
         return cutoff
+    
+    def find_a_cutoffs(self,V):
+        '''
+        Finds the cutoff average observed shock levels abar*(i,phi,n) below
+        which firms exit the market given a value function V
+        '''
+        L=self.L
+        shockgrid=self.shockgrid
+        agegrid=self.agegrid
+        phigrid=self.phigrid
+        
+        cutoff = np.empty((len(range(L)),len(phigrid),len(agegrid)))
+        for i in range(len(L)):
+            for phi_id, phi in enumerate(phigrid):
+                for n in agegrid:
+                    cutoff[i,phi_id,n] = shockgrid[np.searchsorted(V[i,phi_id,:,n],0)]
+                    
+        return cutoff
+    
+    def generate_firm_density(self,V,M):
+        '''
+        Generates the firm density over locations, productivity, average
+        observed signals and age
+        '''
+        L = self.L
+        phigrid = self.phigrid
+        shockgrid = self.shockgrid
+        agegrid = self.agegrid
+        phi_dist = self.phi_dist
+        delta = self.delta
+        mu=self.mu
+        nu=self.nu
+        sig_eps=self.sig_eps
+        
+        m = np.zeros((len(range(L)),len(phigrid),len(shockgrid),len(agegrid)))
+        phi_cutoff = self.find_phi_cutoffs(V)
+        a_cutoff = self.find_a_cutoffs(V)
+        
+        for i in len(range(L)):
+            for phi_id, phi in enumerate(phigrid):
+                for a_id, a in enumerate(shockgrid):
+                    for n in agegrid:
+                        if n == 0:
+                            phi_act = phi > phi_cutoff[i,a_id,n]
+                            m[i,phi_id,a_id,n] = M[i]*phi_dist.pdf(phi)*phi_act
+                        else:
+                            m_fun = lambda x: np.interp(x,shockgrid,m[i,phi,:,n-1])
+                            abardist = lambda x: stats.norm(mu(x,n-1),nu(n-1)+sig_eps**2)
+                            integrand = lambda x: (1-delta)*m_fun(x)*abardist(x).pdf(a)
+                            m[i,phi_id,a_id,n] = integrate.quad(integrand,a_cutoff[i,phi_id,n-1],np.inf)
+                            
+        
+        
     
     def inner_loop(self,wage):
         '''
@@ -160,15 +246,27 @@ class MultiRegionLearning:
         price levels P and masses of entering firms M such that the goods
         market clears.
         '''
-        L = self.L
+        L=self.L
+        shockgrid=self.shockgrid
+        agegrid=self.agegrid
+        phigrid=self.phigrid
         
         P = np.ones(len(L))
         M = np.ones(len(L))
+        V = np.ones((len(range(L)),len(phigrid),len(shockgrid),len(agegrid)))
+        m = np.empty_like(V)
         
         error_tol = 1e-4
         iter_max = 500
+        error = 1
+        count = 0
         
-        while error > error_tol 
+        while error > error_tol and count < iter_max:
+            count +=1
+            V = self.backwards_operator(V,wage,P)
+            m = self.generate_firm_density(V,M)
+            
+            
         
         
         
