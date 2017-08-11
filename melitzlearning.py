@@ -185,7 +185,7 @@ class MultiRegionLearning:
                         
                         V[i,phi_id,a_id,n] = max(Vpayhome+Vpayfor+Vexp,0)
     
-    @jit
+    
     def backwards_operator(self,wage: np.ndarray, P: np.ndarray,
                            W: np.ndarray, wval: np.ndarray, resvec: np.ndarray):
         '''
@@ -233,13 +233,13 @@ class MultiRegionLearning:
                         
                     if n > 0:
                         for phi_id in range(len(phigrid)):
-                            wval = self.linterp(ghpoints*sqrt2*sqrtnuncur+mucur,
+                            wval[phi_id] = self.linterp(ghpoints*sqrt2*sqrtnuncur+mucur,
                                                 shockgrid,
                                                 W[i,phi_id,:,lena-n],resvec)
                     else:
                         wval =  0*wval
                                                                                
-                    Vexp = beta*(1-delta)*ghfactor*sum(ghweights*wval)
+                    Vexp = beta*(1-delta)*ghfactor*wval@ghweights
                     W[i,:,a_id,lena-n-1] = np.maximum(Vpayhome+Vpayfor+Vexp,0)
                         
         return W
@@ -259,7 +259,7 @@ class MultiRegionLearning:
         for i in range(len(L)):
             for a_id, a in enumerate(shockgrid):
                 for n in agegrid:
-                    cutoff[i,a_id,n] = phigrid[np.searchsorted(V[i,:,a_id,n],0)]
+                    cutoff[i,a_id,n] = phigrid[np.searchsorted(V[i,:,a_id,n],1e-5)]
         
         return cutoff
     
@@ -278,12 +278,12 @@ class MultiRegionLearning:
         for i in range(len(L)):
             for phi_id, phi in enumerate(phigrid):
                 for n in agegrid:
-                    cutoff[i,phi_id,n] = shockgrid[np.searchsorted(V[i,phi_id,:,n],0)]
+                    cutoff[i,phi_id,n] = shockgrid[np.searchsorted(V[i,phi_id,:,n],1e-5)]
                     
         return cutoff
     
-    @jit
-    def generate_firm_density(self,V,M):
+
+    def generate_firm_density(self,V,M,mval,resvec):
         '''
         Generates the firm density over locations, productivity, average
         observed signals and age
@@ -292,28 +292,54 @@ class MultiRegionLearning:
         phigrid = self.phigrid
         shockgrid = self.shockgrid
         agegrid = self.agegrid
-        phi_dist = self.phi_dist
+        alpha = self.alpha
+        xmin = self.xmin
         delta = self.delta
-        mu=self.mu
         nu=self.nu
         sig_eps=self.sig_eps
+        sig_theta=self.sig_theta
+        mu_theta=self.mu_theta
         
         m = np.zeros((len(L),len(phigrid),len(shockgrid),len(agegrid)))
         phi_cutoff = self.find_phi_cutoffs(V)
         a_cutoff = self.find_a_cutoffs(V)
         
+        ghpoints = self.ghpoints
+        ghweights= self.ghweights
+        sqrtpi=np.sqrt(np.pi)
+        
         for i in range(len(L)):
-            for phi_id, phi in enumerate(phigrid):
+            for n in agegrid:
+                
+                curfact = (n*sig_theta**2)/(n*sig_theta**2+sig_eps**2)
+                if n==0:
+                    nulastfact = 0
+                else:
+                    nulastfact=np.sqrt(2*nu(n-1))
+                    
                 for a_id, a in enumerate(shockgrid):
-                    for n in agegrid:
+                    
                         if n == 0:
-                            phi_act = phi > phi_cutoff[i,a_id,n]
-                            m[i,phi_id,a_id,n] = M[i]*phi_dist.pdf(phi)*phi_act
+                            phi_act = phigrid > phi_cutoff[i,a_id,n]
+                            if a==0:
+                                m[i,:,a_id,n] = M[i]*alpha*xmin**alpha/(phigrid**(alpha+1))*phi_act
+                            else:
+                                m[i,:,a_id,n] = 0
+                        elif n==1:
+                            indicator = phigrid>=phi_cutoff[i,a_id,n]
+                            m[i,:,a_id,n]= M[i]*alpha*xmin**alpha/(phigrid**(alpha+1))* \
+                                                phi_act*1/sqrtpi*1/nulastfact*\
+                                                np.exp(-(a-mu_theta)**2/nu(n-1))*indicator
                         else:
-                            m_fun = lambda x: np.interp(x,shockgrid,m[i,phi,:,n-1])
-                            abardist = lambda x: stats.norm(mu(x,n-1),nu(n-1)+sig_eps**2)
-                            integrand = lambda x: (1-delta)*m_fun(x)*abardist(x).pdf(a)
-                            m[i,phi_id,a_id,n] = integrate.quad(integrand,a_cutoff[i,phi_id,n-1],np.inf)[0]
+                            xval = ghpoints*curfact*nulastfact+a*1/curfact-mu_theta*sig_eps**2/(n*sig_theta**2)
+                            
+                            transshockgrid = shockgrid*curfact*nulastfact+ \
+                                                a*1/curfact-mu_theta*sig_eps**2/(n*sig_theta**2)
+                            for phi_id in range(len(phigrid)):
+                                indicator = xval >= a_cutoff[i,phi_id,n-1]
+                                mval[phi_id] = self.linterp(xval,transshockgrid,m[i,phi_id,:,n-1],resvec)*indicator
+                                
+                            m[i,:,a_id,n] = (1-delta)*curfact/sqrtpi*mval@ghweights
                             
         return m
                             
@@ -337,17 +363,19 @@ class MultiRegionLearning:
         m = np.empty_like(V)
         
         error_tol = 1e-4
-        iter_max = 500
+        iter_max = 1
         error = 1
         count = 0
         
         while error > error_tol and count < iter_max:
             count +=1
             V = np.zeros((len(L),len(phigrid),len(shockgrid),len(agegrid)))
-            wval = np.zeros(len(self.ghpoints))
+            wval = np.zeros((len(phigrid),len(self.ghpoints)))
             resvec = np.zeros(len(self.ghpoints))
             V = self.backwards_operator(wage,P,V,wval,resvec)
-            m = self.generate_firm_density(V,M)
+            mval = np.zeros((len(phigrid),len(self.ghpoints)))
+            resvec = np.zeros(len(self.ghpoints))
+            m = self.generate_firm_density(V,M,mval,resvec)
             
         return P, M, V, m
             
