@@ -7,7 +7,7 @@ Created on Tue Aug  8 10:31:21 2017
 import numpy as np
 import scipy.stats as stats
 import scipy.integrate as integrate
-from numba import jit
+from numba import jit, njit, prange
 
 
 class MultiRegionLearning:
@@ -22,7 +22,7 @@ class MultiRegionLearning:
                                (1.5,1))),   #Distance matrix
                  gamma = lambda x: x**0.5,  #Distance -> coordination cost
                  xmin=1,                    #scale of the productivity distribution
-                 alpha=3,                   #shape of the productivity distribution 
+                 alpha=8,                   #shape of the productivity distribution 
                  mu_theta=0,                #mean of the preference parameters
                  sig_theta=1,               #variance of the preference parameters
                  sig_eps=1,                 #variance of the preference shock
@@ -32,10 +32,11 @@ class MultiRegionLearning:
                  delta=0.02,                #death shock probability
                  nmax=150,                  #maximum age of a firm
                  sigma=6,                   #CES preference parameter
-                 beta=0.96):                #Time discount rate
+                 beta=0.96,                 #Time discount rate
+                 hermord = 11):             #Nr grid points for Gauss-Hermite
         self.L, self.D, self.gamma = L, D, gamma
         self.xmin, self.alpha = xmin, alpha
-        self.phi_dist = stats.pareto(xmin,scale=alpha)
+        self.phi_dist = stats.pareto(alpha,scale=xmin)
         self.mu_theta, self.sig_theta = mu_theta,sig_theta
         self.theta_dist = stats.norm(loc=mu_theta,scale=sig_theta**2)
         self.sig_eps = sig_eps
@@ -46,6 +47,7 @@ class MultiRegionLearning:
         self.agegrid = np.array(range(nmax))
         self.phigrid = np.linspace(self.phi_dist.ppf(0),self.phi_dist.ppf(0.9999),25)
         self.shockgrid = np.linspace(self.adist.ppf(0.001),self.adist.ppf(0.999),25)
+        self.ghpoints, self.ghweights = np.polynomial.hermite.hermgauss(hermord)
     
     @jit
     def mu(self,abar,n):
@@ -74,7 +76,7 @@ class MultiRegionLearning:
         val = 1/np.sqrt(2*np.pi*sigma_2)*np.exp(-(x-mu)**2/(2*sigma_2))
         return val
     
-    @jit
+    @jit(nopython=True)
     def paretopdf(self,x,scale,shape):
         '''
         pdf at value x of a pareto distribution with scale and shape
@@ -86,22 +88,30 @@ class MultiRegionLearning:
             
         return val
     
-    @jit
-    def linterp(self,x,xval,yval):
-        '''
-        linear interpolator that can be jitted by numba
-        '''
-        pos = np.searchsorted(xval,x)
-        if pos == 0:
-            pos = 1
-        elif pos == len(xval):
-            pos = len(xval)-1
-
-        a = yval[pos-1]
-        b = (yval[pos]-yval[pos-1])/(xval[pos]-xval[pos-1])
-        intval = a+b*(x-xval[pos-1])
+    @njit
+    def linterp(self,x: np.ndarray, xp: np.ndarray, fp: np.ndarray, result: np.ndarray):
+        """Similar to numpy.interp, if x is an array. Also preallocate the 
+        result vector as this doubles the speed"""
+        M = len(x)
         
-        return intval
+        for i in range(M):
+            i_r = np.searchsorted(xp, x[i])
+            
+            # These edge return values are set with left= and right= in np.interp.
+            if i_r == 0:
+                interp_port = (x[i] - xp[i_r]) / (xp[i_r+1] - xp[i_r])
+                result[i] = fp[i_r] + (interp_port * (fp[i_r+1] - fp[i_r]))
+                continue
+            elif i_r == len(xp):
+                interp_port = (x[i] - xp[i_r-1]) / (xp[i_r] - xp[i_r-1])
+                result[i] = fp[i_r] + (interp_port * (fp[i_r] - fp[i_r-1]))
+                continue
+            
+            interp_port = (x[i] - xp[i_r-1]) / (xp[i_r] - xp[i_r-1])
+            
+            result[i] = fp[i_r-1] + (interp_port * (fp[i_r] - fp[i_r-1]))
+
+        return result
     
     @jit    
     def expected_demand(self,abar,n):
@@ -174,12 +184,12 @@ class MultiRegionLearning:
                         
                         V[i,phi_id,a_id,n] = max(Vpayhome+Vpayfor+Vexp,0)
     
-
-    def backwards_operator(self,W,wage,P):
+    @njit(parallel=True)
+    def backwards_operator(self,wage: np.ndarray, P: np.ndarray,
+                           W: np.ndarray, wval: np.ndarray, resvec: np.ndarray):
         '''
-        Bellman operator for a given vector of location specific wages w and
-        price levels P. Takes the current value function guess W and maps it
-        into a new value function V.
+        Function that calculates the value function using backwards iteration 
+        under the assumption that firms die after 150 years
         '''
         L = self.L
         beta = self.beta
@@ -187,34 +197,56 @@ class MultiRegionLearning:
         payoff = self.payoff
         phigrid = self.phigrid
         shockgrid=self.shockgrid
+        agegrid=self.agegrid
+        lena=len(agegrid)
         mu=self.mu
         nu=self.nu
-        sig_eps=self.sig_eps
+        Vpayhome = 0
+        Vpayfor = 0
         
-        for i in range(len(L)):
+        
+        
+        #Initialize points and weights for Gauss hermite quadrature
+        ghpoints = self.ghpoints
+        ghweights = self.ghweights
+        
+        #Precalculate factors that are repeatedly used
+        ghfactor = 1/np.sqrt(np.pi)
+        sqrt2=np.sqrt(2)
+        sqrtnun=np.sqrt(nu(agegrid))
+        
+        
+        for i in prange(len(L)):
             for phi_id, phi in enumerate(phigrid):
                 for n in self.agegrid:
+                    #generate random numbers for monte carlo integration
+                    sqrtnuncur = sqrtnun[lena-n-1]
                     for a_id, a in enumerate(shockgrid):
                                             
-                        Vpayhome = payoff(wage,P,i,i,phi,a,len(self.agegrid)-n-1)
-                        Vpayfor = sum(max(payoff(wage,P,i,j,phi,a,len(self.agegrid)-n-1),0)
-                                    for j in range(len(L)))-max(Vpayhome,0)
+                        Vpayhome = payoff(wage,P,i,i,phi,a,lena-n-1)
                         
-                        @jit
-                        def integrand(x):
-                            if n > 0:
-                                wval = self.linterp(x,shockgrid,W[i,phi_id,:,len(self.agegrid)-n])
-                            else:
-                                wval =  0
-                                                        
-                            val = wval*self.normpdf(x,mu(a,n),nu(n)+sig_eps**2)
-                            return val
+                        Vpayfor = 0
+                        for j in range(len(L)):
+                            Vpayfor +=max(payoff(wage,P,i,j,phi,a,lena-n-1),0)
                         
-                        Vexp = beta*(1-delta)*integrate.quad(integrand,-np.inf,np.inf)[0]
-                        W[i,phi_id,a_id,len(self.agegrid)-n-1] = max(Vpayhome+Vpayfor+Vexp,0)
+                        Vpayfor += -max(Vpayhome,0)
+                        
+                        mucur=mu(a,lena-n-1)
+                        
+                        if n > 0:
+                            wval = self.linterp(ghpoints*sqrt2*sqrtnuncur+mucur,
+                                                shockgrid,
+                                               W[i,phi_id,:,lena-n],
+                                                resvec)
+                        else:
+                            wval =  0*wval
+                                                                               
+                        Vexp = beta*(1-delta)*ghfactor*sum(ghweights*wval)
+                        W[i,phi_id,a_id,lena-n-1] = max(Vpayhome+Vpayfor+Vexp,0)
                         
         return W
     
+    @jit
     def find_phi_cutoffs(self,V):
         '''
         Finds the cutoff productivity levels phi*(i,abar,n) below which firms
@@ -233,6 +265,7 @@ class MultiRegionLearning:
         
         return cutoff
     
+    @jit
     def find_a_cutoffs(self,V):
         '''
         Finds the cutoff average observed shock levels abar*(i,phi,n) below
@@ -251,6 +284,7 @@ class MultiRegionLearning:
                     
         return cutoff
     
+    @jit
     def generate_firm_density(self,V,M):
         '''
         Generates the firm density over locations, productivity, average
@@ -311,7 +345,10 @@ class MultiRegionLearning:
         
         while error > error_tol and count < iter_max:
             count +=1
-            V = self.backwards_operator(V,wage,P)
+            V = np.zeros((len(L),len(phigrid),len(shockgrid),len(agegrid)))
+            wval = np.zeros(len(self.ghpoints))
+            resvec = np.zeros(len(self.ghpoints))
+            V = self.backwards_operator(wage,P,V,wval,resvec)
             m = self.generate_firm_density(V,M)
             
         return P, M, V, m
