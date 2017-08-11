@@ -8,6 +8,7 @@ import numpy as np
 import scipy.stats as stats
 import scipy.integrate as integrate
 from numba import jit, njit, prange
+from joblib import Parallel, delayed
 
 
 class MultiRegionLearning:
@@ -17,21 +18,21 @@ class MultiRegionLearning:
     '''
     
     def __init__(self,
-                 L = np.array((1,2)),       #Population size of the regions
-                 D = np.array(((1,1.5),
-                               (1.5,1))),   #Distance matrix
+                 L = np.array((1.0,2.0)),       #Population size of the regions
+                 D = np.array(((1.0,1.5),
+                               (1.5,1.0))),   #Distance matrix
                  gamma = lambda x: x**0.5,  #Distance -> coordination cost
-                 xmin=1,                    #scale of the productivity distribution
-                 alpha=8,                   #shape of the productivity distribution 
-                 mu_theta=0,                #mean of the preference parameters
-                 sig_theta=1,               #variance of the preference parameters
-                 sig_eps=1,                 #variance of the preference shock
-                 f_h=1,                     #fixed cost of producing in HQ market
+                 xmin=1.0,                    #scale of the productivity distribution
+                 alpha=8.0,                   #shape of the productivity distribution 
+                 mu_theta=0.0,                #mean of the preference parameters
+                 sig_theta=1.0,               #variance of the preference parameters
+                 sig_eps=1.0,                 #variance of the preference shock
+                 f_h=1.0,                     #fixed cost of producing in HQ market
                  f_f=1.5,                   #fixed cost of producing in non-HQ market
-                 f_e=5,                     #market entry cost
+                 f_e=5.0,                     #market entry cost
                  delta=0.02,                #death shock probability
                  nmax=150,                  #maximum age of a firm
-                 sigma=6,                   #CES preference parameter
+                 sigma=6.0,                   #CES preference parameter
                  beta=0.96,                 #Time discount rate
                  hermord = 11):             #Nr grid points for Gauss-Hermite
         self.L, self.D, self.gamma = L, D, gamma
@@ -57,8 +58,8 @@ class MultiRegionLearning:
         '''
         mu_theta, sig_theta, sig_eps = self.mu_theta, self.sig_theta, self.sig_eps
         return (mu_theta*sig_eps**2+n*abar*sig_theta**2)/(n*sig_theta**2+sig_eps**2)
-        
-    @jit    
+    
+    @jit       
     def nu(self,n):
         '''
         Variance of next periods demand shifter when the firm has observed
@@ -88,7 +89,7 @@ class MultiRegionLearning:
             
         return val
     
-    @njit
+    @jit
     def linterp(self,x: np.ndarray, xp: np.ndarray, fp: np.ndarray, result: np.ndarray):
         """Similar to numpy.interp, if x is an array. Also preallocate the 
         result vector as this doubles the speed"""
@@ -184,7 +185,7 @@ class MultiRegionLearning:
                         
                         V[i,phi_id,a_id,n] = max(Vpayhome+Vpayfor+Vexp,0)
     
-    @njit(parallel=True)
+    @jit
     def backwards_operator(self,wage: np.ndarray, P: np.ndarray,
                            W: np.ndarray, wval: np.ndarray, resvec: np.ndarray):
         '''
@@ -216,33 +217,30 @@ class MultiRegionLearning:
         sqrtnun=np.sqrt(nu(agegrid))
         
         
-        for i in prange(len(L)):
-            for phi_id, phi in enumerate(phigrid):
-                for n in self.agegrid:
-                    #generate random numbers for monte carlo integration
-                    sqrtnuncur = sqrtnun[lena-n-1]
-                    for a_id, a in enumerate(shockgrid):
-                                            
-                        Vpayhome = payoff(wage,P,i,i,phi,a,lena-n-1)
+        for i in range(len(L)):
+            for n in self.agegrid:
+                sqrtnuncur = sqrtnun[lena-n-1]
+                for a_id, a in enumerate(shockgrid):
+                    Vpayhome = payoff(wage,P,i,i,phigrid,a,lena-n-1)
                         
-                        Vpayfor = 0
-                        for j in range(len(L)):
-                            Vpayfor +=max(payoff(wage,P,i,j,phi,a,lena-n-1),0)
+                    Vpayfor = 0
+                    for j in range(len(L)):
+                        Vpayfor +=np.maximum(payoff(wage,P,i,j,phigrid,a,lena-n-1),0)
                         
-                        Vpayfor += -max(Vpayhome,0)
+                    Vpayfor += -np.maximum(Vpayhome,0)
                         
-                        mucur=mu(a,lena-n-1)
+                    mucur=mu(a,lena-n-1)
                         
-                        if n > 0:
+                    if n > 0:
+                        for phi_id in range(len(phigrid)):
                             wval = self.linterp(ghpoints*sqrt2*sqrtnuncur+mucur,
                                                 shockgrid,
-                                               W[i,phi_id,:,lena-n],
-                                                resvec)
-                        else:
-                            wval =  0*wval
+                                                W[i,phi_id,:,lena-n],resvec)
+                    else:
+                        wval =  0*wval
                                                                                
-                        Vexp = beta*(1-delta)*ghfactor*sum(ghweights*wval)
-                        W[i,phi_id,a_id,lena-n-1] = max(Vpayhome+Vpayfor+Vexp,0)
+                    Vexp = beta*(1-delta)*ghfactor*sum(ghweights*wval)
+                    W[i,:,a_id,lena-n-1] = np.maximum(Vpayhome+Vpayfor+Vexp,0)
                         
         return W
     
