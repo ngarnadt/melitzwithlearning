@@ -34,7 +34,7 @@ class MultiRegionLearning:
                  nmax=150,                  #maximum age of a firm
                  sigma=6.0,                   #CES preference parameter
                  beta=0.96,                 #Time discount rate
-                 hermord = 11):             #Nr grid points for Gauss-Hermite
+                 hermord = 21):             #Nr grid points for Gauss-Hermite
         self.L, self.D, self.gamma = L, D, gamma
         self.xmin, self.alpha = xmin, alpha
         self.phi_dist = stats.pareto(alpha,scale=xmin)
@@ -62,8 +62,8 @@ class MultiRegionLearning:
     @jit       
     def nu(self,n):
         '''
-        Variance of next periods demand shifter when the firm has observed
-        n signals
+        Variance of the belief about next periods demand shifter when the firm 
+        has observed n signals
         '''
         sig_theta, sig_eps = self.sig_theta, self.sig_eps
         return (sig_theta**2 * sig_eps**2)/(n*sig_theta**2 + sig_eps**2) + sig_eps**2
@@ -105,7 +105,7 @@ class MultiRegionLearning:
                 continue
             elif i_r == len(xp):
                 interp_port = (x[i] - xp[i_r-1]) / (xp[i_r] - xp[i_r-1])
-                result[i] = fp[i_r] + (interp_port * (fp[i_r] - fp[i_r-1]))
+                result[i] = fp[i_r-1] + (interp_port * (fp[i_r] - fp[i_r-1]))
                 continue
             
             interp_port = (x[i] - xp[i_r-1]) / (xp[i_r] - xp[i_r-1])
@@ -123,7 +123,7 @@ class MultiRegionLearning:
         mu = self.mu(abar,n)
         nu = self.nu(n)
         sigma, sig_eps = self.sigma, self.sig_eps
-        return np.exp(mu/sigma+(nu+sig_eps**2)/sigma**2)
+        return np.exp(mu/sigma+(nu)/sigma**2)
    
     @jit 
     def payoff(self,wage,P,homeloc,prodloc,phi,abar,n):
@@ -154,7 +154,8 @@ class MultiRegionLearning:
         '''
         Bellman operator for a given vector of location specific wages w and
         price levels P. Takes the current value function guess W and maps it
-        into a new value function V.
+        into a new value function V. We assume that there is no more learning
+        after len(ngrid) periods
         '''
         L = self.L
         beta = self.beta
@@ -233,7 +234,7 @@ class MultiRegionLearning:
                         
                     if n > 0:
                         for phi_id in range(len(phigrid)):
-                            wval[phi_id] = self.linterp(ghpoints*sqrt2*sqrtnuncur+mucur,
+                            wval[phi_id] = self.linterp(ghpoints*sqrt2*sqrtnuncur/(n+1)+(mucur+n*a)/(n+1),
                                                 shockgrid,
                                                 W[i,phi_id,:,lena-n],resvec)
                     else:
@@ -311,7 +312,7 @@ class MultiRegionLearning:
         for i in range(len(L)):
             for n in agegrid:
                 
-                curfact = (n*sig_theta**2)/(n*sig_theta**2+sig_eps**2)
+                curfact = (sig_eps**2)/(n*sig_theta**2+sig_eps**2)
                 if n==0:
                     nulastfact = 0
                 else:
@@ -326,20 +327,33 @@ class MultiRegionLearning:
                             else:
                                 m[i,:,a_id,n] = 0
                         elif n==1:
+                            #Numerical integration delivers bad results for
+                            #for mass points. Thus use the fact that the first
+                            #periods distribution is just a truncated normal
+                            #around mu_theta multiplied by the pareto pdf of the
+                            phi_act = phigrid > phi_cutoff[i,12,0]
+                            #productivity draw
                             indicator = phigrid>=phi_cutoff[i,a_id,n]
                             m[i,:,a_id,n]= M[i]*alpha*xmin**alpha/(phigrid**(alpha+1))* \
                                                 phi_act*1/sqrtpi*1/nulastfact*\
                                                 np.exp(-(a-mu_theta)**2/nu(n-1))*indicator
                         else:
-                            xval = ghpoints*curfact*nulastfact+a*1/curfact-mu_theta*sig_eps**2/(n*sig_theta**2)
+                            #Use Gauss-Hermite quadrature to calculate the
+                            #integral over past periods average signals
+                            #Current periods mass function is the integral over
+                            #past periods mass for each average signal a(-1) times 
+                            #the probability of the shock that generates the
+                            #new average signal a given that the past average
+                            #signal was a(-1)
                             
-                            transshockgrid = shockgrid*curfact*nulastfact+ \
-                                                a*1/curfact-mu_theta*sig_eps**2/(n*sig_theta**2)
+                            xval = (ghpoints*nulastfact-(n+1)*a+mu_theta* \
+                                    curfact)/(n+1 - curfact)
+                            
                             for phi_id in range(len(phigrid)):
                                 indicator = xval >= a_cutoff[i,phi_id,n-1]
-                                mval[phi_id] = self.linterp(xval,transshockgrid,m[i,phi_id,:,n-1],resvec)*indicator
+                                mval[phi_id] = self.linterp(xval,shockgrid,m[i,phi_id,:,n-1],resvec)*indicator
                                 
-                            m[i,:,a_id,n] = (1-delta)*curfact/sqrtpi*mval@ghweights
+                            m[i,:,a_id,n] = (1-delta)*(n+1)/(n+1-curfact)*1/sqrtpi*mval@ghweights
                             
         return m
                             
