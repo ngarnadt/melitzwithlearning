@@ -5,9 +5,11 @@ Created on Tue Aug  8 10:31:21 2017
 @author: nickilla
 """
 import numpy as np
+import scipy as sp
 import scipy.stats as stats
 import scipy.integrate as integrate
 import scipy.optimize as optimize
+import scipy.interpolate as interpolate
 from numba import jit, njit, prange
 from joblib import Parallel, delayed
 
@@ -246,6 +248,39 @@ class MultiRegionLearning:
                         
         return W
     
+    def EVenter(self,P,wage):
+        '''
+        Calculates the expected value of entering in each location given a wage
+        and price level guess
+        '''
+        
+        L=self.L
+        shockgrid=self.shockgrid
+        agegrid=self.agegrid
+        phigrid=self.phigrid
+        f_e=self.f_e
+        
+        Entvalue = np.ones(len(L))
+        V = np.zeros((len(L),len(phigrid),len(shockgrid),len(agegrid)))
+        wval = np.zeros((len(phigrid),len(self.ghpoints)))
+        resvec = np.zeros(len(self.ghpoints))
+        
+        V = self.backwards_operator(wage,P,V,wval,resvec)
+        #Draw simsize productivities from the productivity distribution
+        #and calculate the value of entry:
+        
+        
+        simsize = 10000000
+        np.random.seed(123987)
+        philist = self.phi_dist.rvs(simsize)
+        for i in range(len(L)):
+            Vint = interpolate.interp1d(phigrid,V[i,:,12,0],kind='cubic',
+                                        fill_value=(V[i,0,12,0],V[i,len(phigrid)-1,12,0]),
+                                        bounds_error=False)
+            Entvalue[i] = sum(Vint(philist))/simsize-f_e*wage[i]
+            
+        return Entvalue
+    
     @jit
     def find_phi_cutoffs(self,V):
         '''
@@ -372,40 +407,28 @@ class MultiRegionLearning:
         agegrid=self.agegrid
         phigrid=self.phigrid
         
-        P = 1.4*np.ones(len(L))
+        P = 1.5/L
         M = np.ones(len(L))
         V = np.ones((len(L),len(phigrid),len(shockgrid),len(agegrid)))
         m = np.empty_like(V)
         Entvalue = np.ones(len(L))
         
-        #Calculate the price levels, which given the wage satisfy the free
-        #entry conditions
-        def EVenter(Prices):
-            V = np.zeros((len(L),len(phigrid),len(shockgrid),len(agegrid)))
-            wval = np.zeros((len(phigrid),len(self.ghpoints)))
-            resvec = np.zeros(len(self.ghpoints))
-            V = self.backwards_operator(wage,P,V,wval,resvec)
-            #Draw simsize productivities from the productivity distribution
-            #and calculate the value of entry:
-            simsize = 30000
-            philist = self.phi_dist.rvs(simsize)
-            for i in range(len(L)):
-                Entvalue[i] = sum(np.interp(philist,phigrid,V[i,:,12,0]))/simsize-self.f_e*wage[i]
-            
-            return Entvalue
-        
-        Pout = optimize.fsolve(EVenter,P,maxfev=10)
+        Optout = optimize.root(self.EVenter,P,args=(wage),method='lm',options={'maxiter' : 30})
+        Pout = Optout['x']
+        print(Pout)
         
         V = np.zeros((len(L),len(phigrid),len(shockgrid),len(agegrid)))
         wval = np.zeros((len(phigrid),len(self.ghpoints)))
         resvec = np.zeros(len(self.ghpoints))
         V = self.backwards_operator(wage,Pout,V,wval,resvec)
         
-        simsize = 30000
+        simsize = 10000000
         philist = self.phi_dist.rvs(simsize)
         for i in range(len(L)):
-            Entvalue[i] = sum(np.interp(philist,phigrid,V[i,:,12,0]))/simsize-self.f_e*wage[i]
-            
+            Vint = interpolate.interp1d(phigrid,V[i,:,12,0],kind='cubic',
+                                        fill_value=(V[i,0,12,0],V[i,len(phigrid)-1,12,0]),
+                                        bounds_error=False)
+            Entvalue[i] = sum(Vint(philist))/simsize-self.f_e*wage[i]
         
         #Calculate the distribution over productivity, age and average signals
         mval = np.zeros((len(phigrid),len(self.ghpoints)))
@@ -416,7 +439,7 @@ class MultiRegionLearning:
         
         #Calculate labor demand in each location
             
-        return P, M, V, m, Entvalue
+        return Pout, M, V, m, Entvalue
             
             
         
