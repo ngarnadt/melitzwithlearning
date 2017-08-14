@@ -7,6 +7,7 @@ Created on Tue Aug  8 10:31:21 2017
 import numpy as np
 import scipy.stats as stats
 import scipy.integrate as integrate
+import scipy.optimize as optimize
 from numba import jit, njit, prange
 from joblib import Parallel, delayed
 
@@ -371,27 +372,51 @@ class MultiRegionLearning:
         agegrid=self.agegrid
         phigrid=self.phigrid
         
-        P = np.ones(len(L))
+        P = 1.4*np.ones(len(L))
         M = np.ones(len(L))
         V = np.ones((len(L),len(phigrid),len(shockgrid),len(agegrid)))
         m = np.empty_like(V)
+        Entvalue = np.ones(len(L))
         
-        error_tol = 1e-4
-        iter_max = 1
-        error = 1
-        count = 0
-        
-        while error > error_tol and count < iter_max:
-            count +=1
+        #Calculate the price levels, which given the wage satisfy the free
+        #entry conditions
+        def EVenter(Prices):
             V = np.zeros((len(L),len(phigrid),len(shockgrid),len(agegrid)))
             wval = np.zeros((len(phigrid),len(self.ghpoints)))
             resvec = np.zeros(len(self.ghpoints))
             V = self.backwards_operator(wage,P,V,wval,resvec)
-            mval = np.zeros((len(phigrid),len(self.ghpoints)))
-            resvec = np.zeros(len(self.ghpoints))
-            m = self.generate_firm_density(V,M,mval,resvec)
+            #Draw simsize productivities from the productivity distribution
+            #and calculate the value of entry:
+            simsize = 30000
+            philist = self.phi_dist.rvs(simsize)
+            for i in range(len(L)):
+                Entvalue[i] = sum(np.interp(philist,phigrid,V[i,:,12,0]))/simsize-self.f_e*wage[i]
             
-        return P, M, V, m
+            return Entvalue
+        
+        Pout = optimize.fsolve(EVenter,P,maxfev=10)
+        
+        V = np.zeros((len(L),len(phigrid),len(shockgrid),len(agegrid)))
+        wval = np.zeros((len(phigrid),len(self.ghpoints)))
+        resvec = np.zeros(len(self.ghpoints))
+        V = self.backwards_operator(wage,Pout,V,wval,resvec)
+        
+        simsize = 30000
+        philist = self.phi_dist.rvs(simsize)
+        for i in range(len(L)):
+            Entvalue[i] = sum(np.interp(philist,phigrid,V[i,:,12,0]))/simsize-self.f_e*wage[i]
+            
+        
+        #Calculate the distribution over productivity, age and average signals
+        mval = np.zeros((len(phigrid),len(self.ghpoints)))
+        resvec = np.zeros(len(self.ghpoints))
+        m = self.generate_firm_density(V,M,mval,resvec)
+            
+        #Calculate the mass of entrants that generates the correct price level
+        
+        #Calculate labor demand in each location
+            
+        return P, M, V, m, Entvalue
             
             
         
