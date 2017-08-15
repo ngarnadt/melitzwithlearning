@@ -10,8 +10,7 @@ import scipy.stats as stats
 import scipy.integrate as integrate
 import scipy.optimize as optimize
 import scipy.interpolate as interpolate
-from numba import jit, njit, prange
-from joblib import Parallel, delayed
+from numba import jit
 
 
 class MultiRegionLearning:
@@ -125,8 +124,8 @@ class MultiRegionLearning:
         '''
         mu = self.mu(abar,n)
         nu = self.nu(n)
-        sigma, sig_eps = self.sigma, self.sig_eps
-        return np.exp(mu/sigma+(nu)/sigma**2)
+        sigma = self.sigma
+        return np.exp(mu/sigma+(nu)/(2*sigma**2))
    
     @jit 
     def payoff(self,wage,P,homeloc,prodloc,phi,abar,n):
@@ -281,6 +280,68 @@ class MultiRegionLearning:
             
         return Entvalue
     
+    def EqPrices(self,M,wage,Prices,CDF,normmass):
+        '''
+        Calculates the difference between the price level implied by the mass
+        of entrants M, given wages and the firm type distribution normmass and
+        the price vector Prices
+        '''
+        shockgrid = self.shockgrid
+        phigrid = self.phigrid
+        agegrid = self.agegrid
+        L = self.L
+        gamma=self.gamma
+        D=self.D
+        
+        
+        sigma = self.sigma
+        nu = self.nu
+        mu = self.mu
+        sqrtpi = np.sqrt(np.pi)
+        
+        ghpoints=self.ghpoints
+        ghweights = self.ghweights
+        
+        Pimp = np.empty_like(L)
+        
+        simsize = 10000000
+        np.random.seed(123987)
+        unilist = np.random.uniform(size=simsize)
+        indexlist = np.empty_like(unilist)
+        
+        b=np.empty((len(shockgrid),len(agegrid)))
+        for a_id, a in enumerate(shockgrid):
+            b[a_id,:] = self.expected_demand(a,agegrid)
+        
+        #calculate the probability of each location, productivity, demand, age
+        #combination
+        
+        indexlist = np.searchsorted(CDF,unilist)
+        
+        #convert flattened index into a coordinate in (i,phi,a,n)
+        iindex = np.floor(indexlist/(len(phigrid)*len(shockgrid)*len(agegrid)))
+        iindex = iindex.astype(int)
+        phiindex = np.floor(indexlist/(len(shockgrid)*len(agegrid))) % len(phigrid)
+        phiindex = phiindex.astype(int)
+        aindex = np.floor(indexlist/len(agegrid)) % len(shockgrid)
+        aindex = aindex.astype(int)
+        nindex = indexlist % len(agegrid)
+            
+        F = np.empty((len(shockgrid),len(agegrid)))
+        for a_id, a in enumerate(shockgrid):
+            for n in agegrid:
+                F[a_id,n] = np.exp((ghpoints*np.sqrt(2*nu(n))+mu(a,n))/sigma)/sqrtpi@ghweights
+        
+        for i in range(len(L)):
+            Pimp[i] = (sum(M[iindex]/simsize*(sigma/(sigma-1)* \
+             wage[iindex]*gamma(D[iindex,i])/(phigrid[phiindex]* \
+                 b[aindex,nindex]))**(1-sigma)*F[aindex,nindex]))**(1/1-sigma)
+
+        
+        Pdiff = Pimp - Prices
+        
+        return Pdiff
+    
     @jit
     def find_phi_cutoffs(self,V):
         '''
@@ -407,7 +468,7 @@ class MultiRegionLearning:
         agegrid=self.agegrid
         phigrid=self.phigrid
         
-        P = 1.5/L
+        P = np.array((1.335877,1.162949))
         M = np.ones(len(L))
         V = np.ones((len(L),len(phigrid),len(shockgrid),len(agegrid)))
         m = np.empty_like(V)
@@ -434,8 +495,17 @@ class MultiRegionLearning:
         mval = np.zeros((len(phigrid),len(self.ghpoints)))
         resvec = np.zeros(len(self.ghpoints))
         m = self.generate_firm_density(V,M,mval,resvec)
+        
+        Totmass = np.sum(m)
+        ppoint = m/Totmass
+        
+        CDF = np.cumsum(ppoint)
             
         #Calculate the mass of entrants that generates the correct price level
+                   
+        Optout2 = optimize.root(self.EqPrices,M,args=(wage,Pout,CDF,m),
+                                method='lm')
+        M = Optout2['x']
         
         #Calculate labor demand in each location
             
