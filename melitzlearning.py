@@ -142,10 +142,10 @@ class MultiRegionLearning:
         expected_demand=self.expected_demand
         Y = wage[prodloc]*self.L[prodloc]
         
-        if type(prodloc)==int:
+        if type(homeloc) == int or type(homeloc)==np.int32:
             homeprod = homeloc==prodloc
         else:
-            homeprod = np.equal(prodloc,homeloc*np.ones(len(prodloc)))
+            homeprod = np.equal(homeloc,prodloc)
         
         fixed_cost = homeprod*self.f_h + (1-homeprod)*self.f_f
         
@@ -157,21 +157,27 @@ class MultiRegionLearning:
     
     @jit
     def labor_demand(self,wage,P,homeloc,prodloc,phi,abar,n):
+        '''
+        Calculates the labor demanded by a firm from homeloc with productivity
+        phi, which has observed n signals with average signal abar when
+        producing in prodloc given the wage vector wage and the price vector P
+        '''
         sigma=self.sigma
         gamma=self.gamma
         D=self.D
         Y = wage[prodloc]*self.L[prodloc]
+       
+        homeprod = np.equal(homeloc,prodloc)
         
-        homeprod = np.equal(prodloc,homeloc*np.ones(len(prodloc)))
         fixed_cost = homeprod*self.f_h + (1-homeprod)*self.f_f
         
         ldem = (self.expected_demand(abar,n)/wage[prodloc]*(sigma-1)/sigma)**sigma \
                *(gamma(D[homeloc,prodloc]/phi))**(1-sigma)*Y/P[prodloc]**(1-sigma) \
                + fixed_cost
         
-        for i in range(homeloc):
-            if homeloc[i] != prodloc and self.payoff(wage,P,homeloc[i],prodloc,phi[i],abar[i],n[i]) <0:
-                ldem[i] = 0
+        pospay = np.greater_equal(self.payoff(wage,P,homeloc,prodloc,phi,abar,n),0)
+        posorhome = np.logical_or(pospay,homeprod)
+        ldem = ldem*posorhome
         
         return ldem
     
@@ -378,6 +384,7 @@ class MultiRegionLearning:
         aindex = np.floor(indexlist/len(agegrid)) % len(shockgrid)
         aindex = aindex.astype(int)
         nindex = indexlist % len(agegrid)
+        nindex = nindex.astype(int)
         
         return iindex, phiindex, aindex, nindex
     
@@ -509,7 +516,7 @@ class MultiRegionLearning:
         f_e=self.f_e
         
         P = np.array((1.335877,1.162949))
-        M = np.ones(len(L))
+        M = np.array((0.1179,0.12401))
         V = np.ones((len(L),len(phigrid),len(shockgrid),len(agegrid)))
         m = np.empty_like(V)
         Entvalue = np.ones(len(L))
@@ -547,19 +554,47 @@ class MultiRegionLearning:
         Optout2 = optimize.root(self.EqPrices,M,args=(wage,Pout,CDF,m),
                                 method='lm')
         M = Optout2['x']
+        print(M)
         
         #Calculate labor demand in each location
         
         iindex, phiindex, aindex, nindex = self.generate_dist(CDF,simsize)
         
         for i in range(len(L)):
-            Ldem[i] = sum(M[iindex]*self.labor_demand(wage,Pout,i,iindex,phigrid[phiindex],
-                      shockgrid[aindex],agegrid[aindex]))/simsize + f_e*M[i]
+            Ldem[i] = sum(M[iindex]*self.labor_demand(wage,Pout,iindex,i,phigrid[phiindex],
+                      shockgrid[aindex],nindex))/simsize + f_e*M[i]
         
         if rettype == 'optimize':
             return Ldem
         else:    
             return Ldem, Pout, M, V, m, Entvalue
+        
+    def wageeval(self,w):
+        w=np.array(w,ndmin=1)
+        wage = np.ones(len(w)+1)
+        wage[0] = 1
+        for i in range(len(w)):
+            wage[i+1]=w[i]
+        
+        Lsupp = self.L
+        Ldem = self.inner_loop(wage)
+        
+        Loversupply = Lsupp - Ldem
+        
+        return Loversupply
+    
+    def outer_loop(self,w_init=1):
+        w_init = np.array(w_init,ndmin=1)
+        wrel = optimize.root(self.wageeval,w_init,method='lm')
+        wrel = np.array(wrel,ndmin=1)
+        wage = np.ones(len(wrel)+1)
+        wage = np.ones(len(wrel)+1)
+        wage[0] = 1
+        for i in range(len(wrel)):
+            wage[i+1]=wrel[i] 
+            
+        return wrel
+        
             
             
         
