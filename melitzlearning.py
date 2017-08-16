@@ -141,10 +141,13 @@ class MultiRegionLearning:
         gamma=self.gamma
         expected_demand=self.expected_demand
         Y = wage[prodloc]*self.L[prodloc]
-        if homeloc == prodloc:
-            fixed_cost = self.f_h
+        
+        if type(prodloc)==int:
+            homeprod = homeloc==prodloc
         else:
-            fixed_cost = self.f_f
+            homeprod = np.equal(prodloc,homeloc*np.ones(len(prodloc)))
+        
+        fixed_cost = homeprod*self.f_h + (1-homeprod)*self.f_f
         
         payoff = (Y/P[prodloc]**(1-sigma)*(phi/
                   (gamma(D[homeloc,prodloc]*wage[prodloc])))**(sigma-1)*
@@ -159,17 +162,16 @@ class MultiRegionLearning:
         D=self.D
         Y = wage[prodloc]*self.L[prodloc]
         
-        if homeloc == prodloc:
-            fixed_cost = self.f_h
-        else:
-            fixed_cost = self.f_f
+        homeprod = np.equal(prodloc,homeloc*np.ones(len(prodloc)))
+        fixed_cost = homeprod*self.f_h + (1-homeprod)*self.f_f
         
         ldem = (self.expected_demand(abar,n)/wage[prodloc]*(sigma-1)/sigma)**sigma \
                *(gamma(D[homeloc,prodloc]/phi))**(1-sigma)*Y/P[prodloc]**(1-sigma) \
                + fixed_cost
         
-        if homeloc != prodloc and self.payoff(wage,P,homeloc,prodloc,phi,abar,n) <0:
-            ldem =0
+        for i in range(homeloc):
+            if homeloc[i] != prodloc and self.payoff(wage,P,homeloc[i],prodloc,phi[i],abar[i],n[i]) <0:
+                ldem[i] = 0
         
         return ldem
     
@@ -341,7 +343,7 @@ class MultiRegionLearning:
                 F[a_id,n] = np.exp((ghpoints*np.sqrt(2*nu(n))+mu(a,n))/sigma)/sqrtpi@ghweights
         
         for i in range(len(L)):
-            prodind[:] = np.greater_equal(self.payoff(wage,Prices,iindex,i,phigrid[phiindex],
+            prodind = np.greater_equal(self.payoff(wage,Prices,iindex,i,phigrid[phiindex],
                    shockgrid[aindex],agegrid[nindex]),np.zeros(simsize))
             prodind[iindex==i] = True
         
