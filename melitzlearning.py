@@ -152,6 +152,27 @@ class MultiRegionLearning:
                      1/(sigma-1)-fixed_cost*wage[prodloc])
         return payoff
     
+    @jit
+    def labor_demand(self,wage,P,homeloc,prodloc,phi,abar,n):
+        sigma=self.sigma
+        gamma=self.gamma
+        D=self.D
+        Y = wage[prodloc]*self.L[prodloc]
+        
+        if homeloc == prodloc:
+            fixed_cost = self.f_h
+        else:
+            fixed_cost = self.f_f
+        
+        ldem = (self.expected_demand(abar,n)/wage[prodloc]*(sigma-1)/sigma)**sigma \
+               *(gamma(D[homeloc,prodloc]/phi))**(1-sigma)*Y/P[prodloc]**(1-sigma) \
+               + fixed_cost
+        
+        if homeloc != prodloc and self.payoff(wage,P,homeloc,prodloc,phi,abar,n) <0:
+            ldem =0
+        
+        return ldem
+    
     def bellman_operator(self,W,wage,P):
         '''
         Bellman operator for a given vector of location specific wages w and
@@ -304,16 +325,45 @@ class MultiRegionLearning:
         
         Pimp = np.empty_like(L)
         
-        simsize = 10000000
+        b=np.empty((len(shockgrid),len(agegrid)))
+        for a_id, a in enumerate(shockgrid):
+            b[a_id,:] = self.expected_demand(a,agegrid)
+            
+        simsize=10000000
+        prodind=np.empty(simsize)
+        iindex, phiindex, aindex, nindex = self.generate_dist(CDF,simsize)
+        
+
+            
+        F = np.empty((len(shockgrid),len(agegrid)))
+        for a_id, a in enumerate(shockgrid):
+            for n in agegrid:
+                F[a_id,n] = np.exp((ghpoints*np.sqrt(2*nu(n))+mu(a,n))/sigma)/sqrtpi@ghweights
+        
+        for i in range(len(L)):
+            prodind[:] = np.greater_equal(self.payoff(wage,Prices,iindex,i,phigrid[phiindex],
+                   shockgrid[aindex],agegrid[nindex]),np.zeros(simsize))
+            prodind[iindex==i] = True
+        
+            Pimp[i] = (sum(M[iindex]*prodind/simsize*(sigma/(sigma-1)* \
+             wage[iindex]*gamma(D[iindex,i])/(phigrid[phiindex]* \
+                 b[aindex,nindex]))**(1-sigma)*F[aindex,nindex]))**(1/1-sigma)
+
+        
+        Pdiff = Pimp - Prices
+        
+        return Pdiff
+    
+    def generate_dist(self,CDF,simsize):
+        phigrid=self.phigrid
+        shockgrid=self.shockgrid
+        agegrid=self.agegrid
+        
         np.random.seed(123987)
         unilist = np.random.uniform(size=simsize)
         indexlist = np.empty_like(unilist)
         
-        b=np.empty((len(shockgrid),len(agegrid)))
-        for a_id, a in enumerate(shockgrid):
-            b[a_id,:] = self.expected_demand(a,agegrid)
-        
-        #calculate the probability of each location, productivity, demand, age
+                #calculate the probability of each location, productivity, demand, age
         #combination
         
         indexlist = np.searchsorted(CDF,unilist)
@@ -326,21 +376,8 @@ class MultiRegionLearning:
         aindex = np.floor(indexlist/len(agegrid)) % len(shockgrid)
         aindex = aindex.astype(int)
         nindex = indexlist % len(agegrid)
-            
-        F = np.empty((len(shockgrid),len(agegrid)))
-        for a_id, a in enumerate(shockgrid):
-            for n in agegrid:
-                F[a_id,n] = np.exp((ghpoints*np.sqrt(2*nu(n))+mu(a,n))/sigma)/sqrtpi@ghweights
         
-        for i in range(len(L)):
-            Pimp[i] = (sum(M[iindex]/simsize*(sigma/(sigma-1)* \
-             wage[iindex]*gamma(D[iindex,i])/(phigrid[phiindex]* \
-                 b[aindex,nindex]))**(1-sigma)*F[aindex,nindex]))**(1/1-sigma)
-
-        
-        Pdiff = Pimp - Prices
-        
-        return Pdiff
+        return iindex, phiindex, aindex, nindex
     
     @jit
     def find_phi_cutoffs(self,V):
@@ -457,7 +494,7 @@ class MultiRegionLearning:
         
         
     
-    def inner_loop(self,wage):
+    def inner_loop(self,wage,rettype='optimize'):
         '''
         For a given verctor of wages wage, this function finds the vector of 
         price levels P and masses of entering firms M such that the goods
@@ -467,12 +504,14 @@ class MultiRegionLearning:
         shockgrid=self.shockgrid
         agegrid=self.agegrid
         phigrid=self.phigrid
+        f_e=self.f_e
         
         P = np.array((1.335877,1.162949))
         M = np.ones(len(L))
         V = np.ones((len(L),len(phigrid),len(shockgrid),len(agegrid)))
         m = np.empty_like(V)
         Entvalue = np.ones(len(L))
+        Ldem = np.empty_like(Entvalue)
         
         Optout = optimize.root(self.EVenter,P,args=(wage),method='lm',options={'maxiter' : 30})
         Pout = Optout['x']
@@ -508,8 +547,17 @@ class MultiRegionLearning:
         M = Optout2['x']
         
         #Calculate labor demand in each location
-            
-        return Pout, M, V, m, Entvalue
+        
+        iindex, phiindex, aindex, nindex = self.generate_dist(CDF,simsize)
+        
+        for i in range(len(L)):
+            Ldem[i] = sum(M[iindex]*self.labor_demand(wage,Pout,i,iindex,phigrid[phiindex],
+                      shockgrid[aindex],agegrid[aindex]))/simsize + f_e*M[i]
+        
+        if rettype == 'optimize':
+            return Ldem
+        else:    
+            return Ldem, Pout, M, V, m, Entvalue
             
             
         
