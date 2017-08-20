@@ -21,8 +21,8 @@ class MultiRegionLearning:
     
     def __init__(self,
                  L = np.array((1.0,2.0)),       #Population size of the regions
-                 D = np.array(((1.0,1.5),
-                               (1.5,1.0))),   #Distance matrix
+                 D = np.array(((1.0,2),
+                               (2,1.0))),   #Distance matrix
                  gamma = lambda x: x**0.5,  #Distance -> coordination cost
                  xmin=1.0,                    #scale of the productivity distribution
                  alpha=8.0,                   #shape of the productivity distribution 
@@ -142,17 +142,15 @@ class MultiRegionLearning:
         expected_demand=self.expected_demand
         Y = wage[prodloc]*self.L[prodloc]
         
-        if type(homeloc) == int or type(homeloc)==np.int32:
-            homeprod = homeloc==prodloc
-        else:
-            homeprod = np.equal(homeloc,prodloc)
+        homeprod = np.equal(homeloc,prodloc)
         
         fixed_cost = homeprod*self.f_h + (1-homeprod)*self.f_f
         
         payoff = (Y/P[prodloc]**(1-sigma)*(phi/
-                  (gamma(D[homeloc,prodloc]*wage[prodloc])))**(sigma-1)*
+                  (gamma(D[homeloc,prodloc])*wage[prodloc]))**(sigma-1)*
                      ((sigma-1)/sigma * expected_demand(abar,n))**sigma*
                      1/(sigma-1)-fixed_cost*wage[prodloc])
+        
         return payoff
     
     @jit
@@ -569,31 +567,28 @@ class MultiRegionLearning:
         else:    
             return Ldem, Pout, M, V, m, Entvalue
         
-    def wageeval(self,w):
-        w=np.array(w,ndmin=1)
-        wage = np.ones(len(w)+1)
-        wage[0] = 1
-        for i in range(len(w)):
-            wage[i+1]=w[i]
+    def wageeval(self,wage):
+        #w=np.array(w,ndmin=1)
+        #wage = np.ones(len(w)+1)
+        #wage[0] = 1
+        #for i in range(len(w)):
+        #    wage[i+1]=w[i]
+        #
+        print(wage)
         
         Lsupp = self.L
         Ldem = self.inner_loop(wage)
         
         Loversupply = Lsupp - Ldem
+        print(Loversupply)
         
         return Loversupply
     
-    def outer_loop(self,w_init=1):
-        w_init = np.array(w_init,ndmin=1)
-        wrel = optimize.root(self.wageeval,w_init,method='lm')
-        wrel = np.array(wrel,ndmin=1)
-        wage = np.ones(len(wrel)+1)
-        wage = np.ones(len(wrel)+1)
-        wage[0] = 1
-        for i in range(len(wrel)):
-            wage[i+1]=wrel[i] 
+    def outer_loop(self,w_init=np.array((1,1))):
+        startwage = np.array(w_init)
+        wage = optimize.fsolve(self.wageeval,startwage)
             
-        return wrel
+        return wage
         
             
             
